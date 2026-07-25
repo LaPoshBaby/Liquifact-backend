@@ -4,6 +4,7 @@ const express = require('express');
 const { verifySignature } = require('../services/webhooks');
 const kycService = require('../services/kycService');
 const logger = require('../logger');
+const kycIdempotencyMiddleware = require('../middleware/kycIdempotency');
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ const router = express.Router();
 function parseJsonPayload(rawBody) {
   try {
     return JSON.parse(rawBody);
-  } catch (error) {
+  } catch (_error) {
     throw new Error('Invalid JSON payload');
   }
 }
@@ -28,8 +29,12 @@ function parseJsonPayload(rawBody) {
  * Verifies the webhook signature using the configured provider secret,
  * maps provider-specific statuses to internal KYC statuses, and persists
  * the result to the KYC record store.
+ *
+ * Idempotency: accepts an `Idempotency-Key` header.  Duplicate keys
+ * with the same body return the cached response; duplicate keys with a
+ * different body return 409.
  */
-router.post('/webhook', async (req, res) => {
+router.post('/webhook', kycIdempotencyMiddleware, async (req, res) => {
   const config = kycService.getKycProviderConfig();
   const secret = config.apiSecret;
   const signatureHeader = req.header('X-Signature');
