@@ -27,6 +27,7 @@ const { correlationIdMiddleware } = require('./middleware/correlationId');
 const invoiceService = require('./services/invoiceService');
 const { resolveEscrowAddress } = require('./config/escrowMap');
 const { getEscrowStateWithProjection } = require('./services/escrowRead');
+const { recordEscrowRead } = require('./services/escrowReadMetrics');
 const { createCorsOptions, isCorsOriginRejectedError } = require('./config/cors');
 const { validateInvoiceQueryParams } = require('./utils/validators');
 const { computeEscrowDerivedFields } = require('./services/escrowDerived');
@@ -50,6 +51,7 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const reconciliationRoutes = require('./routes/reconciliation');
 const kycRoutes = require('./routes/kyc');
 const v1Routes = require('./routes/v1');
 
@@ -268,6 +270,7 @@ function createApp() {
 
   // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
   app.get('/api/escrow/:invoiceId', async (req, res) => {
+    const startTime = Date.now();
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');
@@ -277,9 +280,11 @@ function createApp() {
       const escrowAddress = resolveEscrowAddress(invoiceId);
       
       if (!escrowAddress) {
-        return res.status(404).json({ 
+        res.status(404).json({ 
           error: `No escrow contract mapping found for invoice ID '${invoiceId}'` 
         });
+        recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 404 });
+        return;
       }
 
       // Read from projection, cache, or live read fallback
@@ -295,14 +300,16 @@ function createApp() {
 
       // Include escrow address in response headers
       res.set('X-Escrow-Address', escrowAddress);
-      res.json({
+      res.status(200).json({
         data,
         message: state.fromProjection 
           ? 'Escrow state read from event projection.'
           : 'Escrow state read from live Soroban contract.',
       });
+      recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 200 });
     } catch (error) {
       res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+      recordEscrowRead({ startTime, invoiceId, endpoint: 'legacy', statusCode: 500, err: error });
     }
   });
 

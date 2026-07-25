@@ -72,6 +72,21 @@ try {
     setToCurrentTime() {}
   }
 
+  /**
+   * Histogram shim for test environments.
+   * @implements {import('prom-client').Histogram}
+   */
+  class HistogramShim {
+    /** @param {void} */
+    constructor() {}
+    /** @returns {void} */
+    observe() {}
+    /** @returns {Function} */
+    labels() { return this; }
+    /** @returns {void} */
+    inc() {}
+  }
+
   client = {
     Registry: RegistryShim,
     /**
@@ -81,6 +96,7 @@ try {
     collectDefaultMetrics: () => { },
     Counter: CounterShim,
     Gauge: GaugeShim,
+    Histogram: HistogramShim,
   };
 }
 
@@ -88,6 +104,13 @@ const METRIC_REFRESH_INTERVAL_MS = 5000;
 const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
 let refreshTimer = null;
+
+/** Shared registry — declared before gauges that reference it. */
+const registry = new client.Registry();
+
+if (typeof client.collectDefaultMetrics === 'function') {
+  client.collectDefaultMetrics({ register: registry });
+}
 
 const queueDepthGauge = new client.Gauge({
   name: 'liquifact_job_queue_depth',
@@ -345,13 +368,6 @@ async function metricsHandler(_req, res) {
   res.end(await registry.metrics());
 }
 
-/** Shared registry — exported so tests can reset it between runs. */
-const registry = new client.Registry();
-
-if (typeof client.collectDefaultMetrics === 'function') {
-  client.collectDefaultMetrics({ register: registry });
-}
-
 /**
  * Counter: Escrow events successfully processed by the indexer per cycle.
  * Incremented by the number of events persisted in each indexer cycle.
@@ -498,6 +514,45 @@ const readinessGauge = new client.Gauge({
   registers: [registry],
 });
 
+// ── Escrow-read endpoint metrics ───────────────────────────────────────────
+
+/**
+ * Counter: Escrow-read requests total, labelled by endpoint and outcome status.
+ * Labels: endpoint ("legacy"|"v1"), status ("success"|"client_error"|"server_error")
+ * @type {import('prom-client').Counter}
+ */
+const escrowReadRequestsTotal = new client.Counter({
+  name: 'escrow_read_requests_total',
+  help: 'Total number of escrow-read requests served, labelled by endpoint and status',
+  labelNames: ['endpoint', 'status'],
+  registers: [registry],
+});
+
+/**
+ * Histogram: Escrow-read request duration in seconds.
+ * Labels: endpoint ("legacy"|"v1"), status ("success"|"client_error"|"server_error")
+ * @type {import('prom-client').Histogram}
+ */
+const escrowReadRequestDurationSeconds = new client.Histogram({
+  name: 'escrow_read_request_duration_seconds',
+  help: 'Escrow-read request duration in seconds, labelled by endpoint and status',
+  labelNames: ['endpoint', 'status'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow-read errors, labelled by endpoint and error cause.
+ * Labels: endpoint ("legacy"|"v1"), error_cause (e.g. "not_found", "internal", "invalid_id")
+ * @type {import('prom-client').Counter}
+ */
+const escrowReadErrorsTotal = new client.Counter({
+  name: 'escrow_read_errors_total',
+  help: 'Total number of escrow-read request errors, labelled by endpoint and error cause',
+  labelNames: ['endpoint', 'error_cause'],
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   metricsAuth,
@@ -506,4 +561,7 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
+  escrowReadRequestsTotal,
+  escrowReadRequestDurationSeconds,
+  escrowReadErrorsTotal,
 };
