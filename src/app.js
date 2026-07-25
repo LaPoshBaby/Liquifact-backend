@@ -40,6 +40,7 @@ const {
 const { performHealthChecks, performReadinessChecks } = require('./services/health');
 const responseHelper = require('./utils/responseHelper');
 const logger = require('./logger');
+const { escrowReadLimiter } = require('./middleware/rateLimit');
 const { metricsAuth, metricsHandler } = require('./metrics');
 const smeRoutes = require('./routes/sme');
 const invoiceFileRoutes = require('./routes/invoiceFile');
@@ -50,6 +51,7 @@ const marketplaceRoutes = require('./routes/marketplace');
 const retentionRoutes = require('./routes/retention');
 const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
+const reconciliationRoutes = require('./routes/reconciliation');
 const kycRoutes = require('./routes/kyc');
 const v1Routes = require('./routes/v1');
 
@@ -266,8 +268,8 @@ function createApp() {
     });
   });
 
-  // Escrow — GET by invoiceId (proxied through Soroban retry wrapper with address mapping)
-  app.get('/api/escrow/:invoiceId', async (req, res) => {
+  // Escrow — GET by invoiceId (rate-limited, proxied through Soroban retry wrapper with address mapping)
+  app.get('/api/escrow/:invoiceId', escrowReadLimiter, async (req, res) => {
     const invoiceId = String(req.params.invoiceId || '')
       .trim()
       .replace(/\s+/g, '');

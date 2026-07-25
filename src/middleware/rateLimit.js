@@ -10,74 +10,11 @@
  * - RATE_LIMIT_SENSITIVE_MAX: Max requests per window for sensitive limiter (default: 40)
  * - RATE_LIMIT_API_KEY_WINDOW_MS: Time window for API key limit (default: 15 minutes)
  * - RATE_LIMIT_API_KEY_MAX: Max requests per window per API key (default: 1000)
+ * - RATE_LIMIT_ESCROW_READ_WINDOW_MS: Window for escrow-read endpoints (default: 60 s)
+ * - RATE_LIMIT_ESCROW_READ_MAX: Max escrow-read requests per window (default: 30)
  */
 
 const rateLimit = require('express-rate-limit');
-
-const rateLimit = require('express-rate-limit');
-const { RedisStore } = require('rate-limit-redis');
-const { getRedisClient } = require('../cache/redis');
-
-// Emulating original parsing utility configuration hooks
-const WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000;
-const MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 100;
-
-/**
- * Creates an isolated, context-aware rate limiting middleware block.
- * Uses a Redis backing layer if available, otherwise safely falls back to standard memory tracks.
- * * @param {string} scope - The structural namespace isolation marker (e.g., 'global', 'sensitive', 'api-key')
- * @param {number} windowMs - The tracking duration window block in milliseconds
- * @param {number} max - Request limits allowed inside the designated window frame
- * @returns {Function} Express middleware handler
- */
-function createRateLimiter(scope, windowMs = WINDOW_MS, max = MAX_REQUESTS) {
-  const { client, isAvailable } = getRedisClient();
-  let store;
-
-  if (isAvailable && client) {
-    store = new RedisStore({
-      sendCommand: (...args) => client.sendCommand(args),
-      prefix: `rate-limit:${scope}:`,
-    });
-  } else {
-    console.warn(`[RateLimit] Redis store unavailable for scope [${scope}]. Falling back safely to MemoryStore.`);
-  }
-
-  return rateLimit({
-    windowMs,
-    max,
-    standardHeaders: true,
-    legacyHeaders: false,
-    store,
-    keyGenerator: (req) => {
-      // Prioritize authenticated API Keys over direct machine client IP strings
-      return req.headers['x-api-key'] || req.ip;
-    },
-    handler: (req, res, next, options) => {
-      res.status(options.statusCode).json({
-        error: 'Too many requests.',
-        message: `Rate limit threshold breached for scope: ${scope}. Please try again later.`,
-      });
-    },
-    // Fail-open strategy: If Redis times out or fails midway through execution, log warning and let request bypass
-    skip: () => {
-      if (store && !getRedisClient().isAvailable) {
-        console.error(`[RateLimit] Emergency fail-open bypass activated on scope [${scope}] due to live Redis link dropout.`);
-        return true;
-      }
-      return false;
-    }
-  });
-}
-
-const globalLimiter = createRateLimiter('global', WINDOW_MS, MAX_REQUESTS);
-const sensitiveLimiter = createRateLimiter('sensitive', 5 * 60 * 1000, 20);
-
-module.exports = {
-  createRateLimiter,
-  globalLimiter,
-  sensitiveLimiter,
-};
 
 /**
  * Parse environment variable as positive integer.
@@ -142,6 +79,35 @@ const SENSITIVE_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_WINDOW_MS', 
 const SENSITIVE_MAX = parseRateLimitEnv('RATE_LIMIT_SENSITIVE_MAX', 40);
 const API_KEY_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_API_KEY_WINDOW_MS', 15 * 60 * 1000);
 const API_KEY_MAX = parseRateLimitEnv('RATE_LIMIT_API_KEY_MAX', 1000);
+const ESCROW_READ_WINDOW_MS = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_WINDOW_MS', 60 * 1000);
+const ESCROW_READ_MAX = parseRateLimitEnv('RATE_LIMIT_ESCROW_READ_MAX', 30);
+
+/**
+ * Escrow-read rate limiter.
+ *
+ * Protects GET /api/escrow/:invoiceId and GET /v1/escrow/:invoiceId from
+ * abuse.  Per-client (API key or IP) limiting with a short window (default
+ * 60 s, 30 requests) suitable for a read-heavy endpoint.
+ *
+ * Environment overrides:
+ *   RATE_LIMIT_ESCROW_READ_WINDOW_MS  - window in ms (default 60 000)
+ *   RATE_LIMIT_ESCROW_READ_MAX        - max requests per window (default 30)
+ *
+ * @returns {Function} Express rate limiting middleware.
+ */
+const escrowReadLimiter = rateLimit({
+  windowMs: ESCROW_READ_WINDOW_MS,
+  limit: ESCROW_READ_MAX,
+  message: {
+    error: 'Too many escrow-read requests. Please try again shortly.',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  validate: {
+    xForwardedForHeader: false,
+  },
+});
 
 /**
  * Standard global rate limiter for all API endpoints.
@@ -208,6 +174,7 @@ module.exports = {
   globalLimiter,
   sensitiveLimiter,
   apiKeyLimiter,
+  escrowReadLimiter,
   parseRateLimitEnv,
   keyGenerator,
   apiKeyKeyGenerator,
